@@ -1,0 +1,155 @@
+# 配信（段2・本番）— 社長の決裁 2026-10-28 18:15「github でやろ」で、Mac の launchd から替える
+#
+# 相場と天気を GitHub の機械が作り、**ルートの `prices.json`・`weather.json` に書く**
+# （アプリが読む物を Actions が作る）。段1（feed.yml）は予約を止めてある（手でだけ動く）。
+#
+# ★ 秘書の手順（置き場へ入れたあと）
+#   1. push する（.github/workflows/ と tools/ が入る）
+#   2. Actions タブ →「配信（段2・本番）」→ Run workflow（what は both のまま）
+#   3. 公開 URL で確かめる：prices.json の「生成時刻」が今で、天気の「取得」が今。
+#      田中が止まっている日は prices.json に「状態」（最新:false）が出て、この回は赤になる（正常）
+#   4. 確かめられたら、Mac の launchd 3本を止める（二重に書かない）：
+#        python3 scripts/feed/disable_mac_jobs.py --go     （アプリ開発部の repo で。--go なしは表示だけ）
+#      戻すときは --restore --go
+#
+# 失敗した日の約束
+#   - 相場：取れなければ tools/build_prices.py が prices.json の「状態」だけを差し替える（値と生成時刻は
+#     そのまま・便432①）。**この回は赤で終わるが、状態を差し替えた prices.json はコミットして公開する。**
+#   - 天気：1件も取れなければ weather.json は書き換えない。赤で終わる。
+#   - 0バイト・読めない JSON は、**絶対にコミットしない**（tools/check_json.py）。
+#   - push を断られたら、1回だけ pull --rebase して押し直す。
+
+name: 配信（段2・本番）
+
+on:
+  schedule:
+    # 書いてある時刻は UTC。括弧の中が日本時間（JST = UTC + 9時間）。
+    # 毎時 00分ちょうどは世界中の予約が重なって遅れやすいので、5分ずらしてある。
+    - cron: "5 21 * * *"    # 21:05 UTC ＝ 翌 06:05 JST  天気
+    - cron: "5 3 * * *"     # 03:05 UTC ＝    12:05 JST  天気
+    - cron: "35 8 * * *"    # 08:35 UTC ＝    17:35 JST  相場
+    - cron: "5 9 * * *"     # 09:05 UTC ＝    18:05 JST  天気
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "何を取るか"
+        type: choice
+        default: both
+        options: [both, prices, weather]
+
+permissions:
+  contents: write
+
+# 段1 と**同じ群の名前**にしてある。両方が走っても、重ならない
+concurrency:
+  group: feed
+  cancel-in-progress: false
+
+env:
+  # **これを忘れると 9時間ずれる**（Actions の機械は既定が UTC）
+  TZ: Asia/Tokyo
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: python を確かめる
+        run: python3 -VV
+
+      # ---- 相場（17:35 の回だけ） -------------------------------------
+      # **失敗しても後ろの手順を走らせる**（continue-on-error）。失敗の「状態」を公開するため。
+      # 赤にするのは、いちばん最後の「失敗を赤で知らせる」手順
+      - name: 相場を取る
+        id: prices
+        continue-on-error: true
+        if: >-
+          github.event.schedule == '35 8 * * *' ||
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.what == 'both' || inputs.what == 'prices'))
+        run: python3 tools/build_prices.py prices.json
+
+      # ---- 天気（6:05・12:05・18:05 の回だけ） ------------------------
+      - name: 天気を取る
+        id: weather
+        continue-on-error: true
+        if: >-
+          github.event.schedule == '5 21 * * *' ||
+          github.event.schedule == '5 3 * * *' ||
+          github.event.schedule == '5 9 * * *' ||
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.what == 'both' || inputs.what == 'weather'))
+        run: python3 tools/build_weather.py --out weather.json
+
+      # ---- 置き場へ押し上げる -----------------------------------------
+      # **コミットするのはルートの prices.json・weather.json の 2本だけ。**
+      # 読めない・空の物は add しない。変わっていなければ commit しない
+      - name: 変わっていれば commit する
+        id: publish
+        if: always()
+        run: |
+          bad=0
+          for f in prices.json weather.json; do
+            if [ ! -f "$f" ]; then continue; fi
+            if python3 tools/check_json.py "$f"; then
+              git add -- "$f"
+            else
+              echo "::error::$f は公開しない（壊れている）。コミットされた版へ戻す"
+              git checkout -- "$f" || true
+              bad=1
+            fi
+          done
+          if git diff --cached --quiet; then
+            echo "押す物が無い（変わっていない）"
+          else
+            git -c user.email=mypiece.support@gmail.com -c user.name="My piece" \
+                commit -q -m "配信を更新（$(date '+%F %T')）"
+            git push || { git pull --rebase && git push; }
+            echo "押し上げた"
+          fi
+          exit $bad
+
+      # ---- 失敗を赤で知らせる（公開は済んだあと） ---------------------
+      - name: 失敗を赤で知らせる
+        if: always() && (steps.prices.outcome == 'failure' || steps.weather.outcome == 'failure')
+        run: |
+          echo "::error::取り込みに失敗した（相場=${{ steps.prices.outcome }} 天気=${{ steps.weather.outcome }}）。公開できる物は上で公開済み"
+          exit 1
+
+  # 60日で予約が止まるのを防ぐための声かけ（月はじめ・夜の回だけ）。
+  # 中身の理由は `docs/配信の手順_Actions.md` の 4章
+  keepalive:
+    if: github.event.schedule == '5 9 * * *'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: 月はじめなら、点検の宿題を1枚立てる
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "毎月の点検：配信を手で1回まわしてください"
+        run: |
+          if [ "$(date '+%d')" != "01" ]; then
+            echo "月はじめではない。何もしない"; exit 0
+          fi
+          open=$(gh issue list --state open --search "$TITLE in:title" --json number --jq 'length')
+          if [ "${open:-0}" != "0" ]; then
+            echo "すでに開いている。何もしない"; exit 0
+          fi
+          # **ヒアドキュメント（<<MD …）は使えない**（yml の字下げと衝突する）
+          gh issue create --title "$TITLE" --body "$(printf '%s\n' \
+            '公開リポジトリの予約実行は、置き場に動きが無いまま60日たつと GitHub が自動で止めます。' \
+            'この仕事じたいの commit が「動き」に数えられるかは、GitHub の文書に書かれていません。' \
+            '' \
+            '**1分で済む点検です。**' \
+            '' \
+            '1. 上の「Actions」タブを開く' \
+            '2. 左の一覧から「配信（段2・本番）」を選ぶ' \
+            '3. 右の「Run workflow」を押す（何を取るかは weather のままでよい）' \
+            '4. 緑のチェックが付いたら、この宿題を閉じる' \
+            '' \
+            '止まっていた場合は、同じ画面に「Enable workflow」というボタンが出ます。' \
+            'それを押せば戻ります。詳しくは `docs/配信の手順_Actions.md`。')"
+          echo "宿題を立てた"

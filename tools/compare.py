@@ -25,7 +25,7 @@ import json
 import sys
 
 # 走らせた時刻が入る鍵。**値が違って当たり前なので数えない**
-TIME_KEYS = ("生成時刻", "取得")
+TIME_KEYS = ("生成時刻", "取得", "状態")  # 状態は取れた日・取れなかった日で形が変わる（便432）
 
 
 def walk(a, b, path, shape, value, time_keys):

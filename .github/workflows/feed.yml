@@ -15,13 +15,13 @@
 name: 配信（段1・staging）
 
 on:
-  schedule:
-    # **ここに書く時刻は UTC。**括弧の中が日本時間（JST = UTC + 9時間）。
-    # 毎時 00分ちょうどは世界中の予約が重なって遅れやすいので、5分ずらしてある。
-    - cron: "5 21 * * *"    # 21:05 UTC ＝ 翌 06:05 JST  天気
-    - cron: "5 3 * * *"     # 03:05 UTC ＝    12:05 JST  天気
-    - cron: "35 8 * * *"    # 08:35 UTC ＝    17:35 JST  相場
-    - cron: "5 9 * * *"     # 09:05 UTC ＝    18:05 JST  天気
+  # ★ 2026-10-28 社長の決裁「github でやろ」で段2（feed.switch.yml）へ替えた。
+  #   **同じ日に 2本が相手先を叩かないよう、段1 の予約は止めてある**（手で Run workflow したときだけ動く）。
+  # schedule:
+  #   - cron: "5 21 * * *"    # 21:05 UTC ＝ 翌 06:05 JST  天気
+  #   - cron: "5 3 * * *"     # 03:05 UTC ＝    12:05 JST  天気
+  #   - cron: "35 8 * * *"    # 08:35 UTC ＝    17:35 JST  相場
+  #   - cron: "5 9 * * *"     # 09:05 UTC ＝    18:05 JST  天気
   # 手で回すための口。Actions のタブ →「配信（段1・staging）」→「Run workflow」
   workflow_dispatch:
     inputs:

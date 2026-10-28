@@ -23,8 +23,10 @@ K18 は純度計算 17,780 に対し実際 15,831 で **-11.0%**、K10 は **-20
 import json
 import os
 import re
+import socket
 import sys
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -54,8 +56,16 @@ METALS = [("gold", "金", "d-gold.php"),
 
 def get(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Cache-Control": "no-cache"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", "replace")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        # 保守ページの字で「止まっている」と「壊れた」を分けるため、本文を持ち出す
+        try:
+            e.body = e.read().decode("utf-8", "replace")
+        except Exception:
+            e.body = ""
+        raise
 
 
 def cells(row):
@@ -150,19 +160,98 @@ def buy_daily(page, newest_date):
     rows.sort()
     return rows
 
+# ---------------------------------------------------------------- 取れなかった日
+class FormatChanged(Exception):
+    """読めたが、表が見つからない・空だった（ページの形が変わった）。"""
+
+
+MAINTENANCE_WORDS = ("一時停止", "メンテナンス", "保守", "セキュリティ")
+
+
+def classify(e):
+    """例外 → (理由コード, 理由)。鍵と文言はアプリ（②席）が読む。変えない。"""
+    if isinstance(e, urllib.error.HTTPError):
+        if e.code >= 500:
+            body = getattr(e, "body", "") or ""
+            if any(w in body for w in MAINTENANCE_WORDS):
+                return "maintenance", "田中貴金属のサイトが一時停止中"
+            return "server_error", "田中貴金属のサイトが応答していません"
+        if e.code >= 400:
+            return "format_changed", "田中貴金属のページの形が変わり、読めません"
+        return "unknown", "公表元から取得できていません"
+    if isinstance(e, FormatChanged):
+        return "format_changed", "田中貴金属のページの形が変わり、読めません"
+    if isinstance(e, (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError)):
+        return "unreachable", "田中貴金属のサイトに繋がりません"
+    return "unknown", "公表元から取得できていません"
+
+
+def write_atomic(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def write_failure(path, now, code, reason):
+    """既存の JSON の「状態」だけを差し替える。値・生成時刻は 1字も触らない。
+    既存が無い／読めないときは何も書かない。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            old = json.load(f)
+        if not isinstance(old, dict):
+            raise ValueError("object ではない")
+    except Exception as e:
+        print("既存の %s を読めないので、何も書かない: %s" % (path, e))
+        return False
+    prev = old.get("状態")
+    if isinstance(prev, dict) and prev.get("最新") is False and prev.get("最後に取れた公表"):
+        last = prev["最後に取れた公表"]
+    else:
+        last = (old.get("リサイクル価格") or {}).get("発表")
+    status = {"最新": False, "最後に取れた公表": last, "確認時刻": now,
+              "理由コード": code, "理由": reason}
+    new = {}
+    for k, v in old.items():
+        if k == "状態":
+            continue
+        new[k] = v
+        if k == "生成時刻":
+            new["状態"] = status
+    if "状態" not in new:
+        new["状態"] = status
+    write_atomic(path, new)
+    return True
+
+
+def fetch():
+    asof, recycle, examples = recycle_prices()
+    if not recycle:
+        raise FormatChanged("リサイクル価格の表が見つからない")
+    retail, buy = {}, {}
+    for key, jp, page in METALS:
+        retail[jp] = retail_daily(page)
+        if not retail[jp]:
+            raise FormatChanged("%s の小売日次が空" % jp)
+        buy[jp] = buy_daily(page, retail[jp][-1][0])
+    return asof, recycle, examples, retail, buy
+
 
 def main():
     out = out_path()
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    asof, recycle, examples = recycle_prices()
-
-    retail, buy = {}, {}
-    for key, jp, page in METALS:
-        retail[jp] = retail_daily(page)
-        buy[jp] = buy_daily(page, retail[jp][-1][0] if retail[jp] else now[:10])
+    try:
+        asof, recycle, examples, retail, buy = fetch()
+    except Exception as e:
+        code, reason = classify(e)
+        print("取れなかった: %s（%s）%s: %s" % (code, reason, type(e).__name__, e))
+        if write_failure(out, now, code, reason):
+            print("状態だけ差し替えた:", out)
+        return 1
 
     data = {
         "生成時刻": now,
+        "状態": {"最新": True},
         "注意": "3つの系列は定義が違う。1本の線に繋がないこと。",
         "リサイクル価格": {
             "定義": ("田中貴金属 RE:TANAKA の品位別リサイクル価格（税込・円/グラム）。"
@@ -191,10 +280,7 @@ def main():
     }
     # **取れなかった日に古い JSON を壊さない。**上まで来ていれば 3系列とも取れている。
     # 一時ファイルへ書いて、書き切れたときだけ差し替える（途中で落ちても元が残る）
-    tmp = out + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, out)
+    write_atomic(out, data)
 
     print("書いた:", out)
     print("  リサイクル価格 発表:", asof)
