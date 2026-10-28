@@ -176,8 +176,10 @@ def classify(e):
             if any(w in body for w in MAINTENANCE_WORDS):
                 return "maintenance", "田中貴金属のサイトが一時停止中"
             return "server_error", "田中貴金属のサイトが応答していません"
-        if e.code >= 400:
+        if e.code in (404, 410):
             return "format_changed", "田中貴金属のページの形が変わり、読めません"
+        if e.code >= 400:
+            return "blocked", "田中貴金属のサイトから取得できていません"
         return "unknown", "公表元から取得できていません"
     if isinstance(e, FormatChanged):
         return "format_changed", "田中貴金属のページの形が変わり、読めません"
